@@ -1,0 +1,85 @@
+name: Sync with upstream
+
+# Fork-only workflow: keeps this fork's `main` tracking morluto/rea.
+# It runs on GitHub runners, so the fork continues to follow upstream even
+# when no local machine is online.
+#
+# Merge (never force) is used on purpose: if this fork ever gains its own
+# commits, they are preserved and a conflicting upstream change fails the
+# job instead of overwriting local work.
+
+on:
+  schedule:
+    # Hourly. Scheduled workflows only run from the default branch and can be
+    # delayed a few minutes at peak times.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge morluto/rea main into the fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUSKY: "0"
+      UPSTREAM_REPO: morluto/rea
+      UPSTREAM_BRANCH: main
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "rea fork sync"
+          git config user.email "actions@users.noreply.github.com"
+
+      - name: Merge upstream
+        id: sync
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+          behind=$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}")
+          ahead=$(git rev-list --count "upstream/${UPSTREAM_BRANCH}..HEAD")
+          echo "Fork main is behind upstream by ${behind} commit(s), ahead by ${ahead} commit(s)."
+          {
+            echo "### Sync with ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+            echo ""
+            echo "- new upstream commits: **${behind}**"
+            echo "- fork-only commits: **${ahead}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${behind}" = "0" ]; then
+            echo "Already up to date; nothing to push."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "Incoming:"
+            echo '```'
+            git log --oneline --no-decorate "HEAD..upstream/${UPSTREAM_BRANCH}" | head -30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if ! git merge --no-edit "upstream/${UPSTREAM_BRANCH}"; then
+            echo "::error::Merge conflict while syncing with ${UPSTREAM_REPO}; resolve manually."
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push to the fork
+        if: steps.sync.outputs.changed == 'true'
+        run: git push origin "HEAD:${UPSTREAM_BRANCH}"
